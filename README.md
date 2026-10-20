@@ -17,6 +17,28 @@ export NEO4J_PASSWORD='set-this-outside-git'
 
 Do not commit `.env` files or passwords. All database sessions use Neo4j's read access mode.
 
+### Proxy-aware HTTP transport
+
+If raw Bolt TCP is unavailable, use Neo4j's existing HTTP transaction endpoint. The toolkit detects
+an `http://` or `https://` URI and uses a proxy-aware HTTP client while keeping every analysis script
+unchanged:
+
+```bash
+export NEO4J_URI='https://graph.example.com'
+python scripts/01_claim_battlefield.py
+```
+
+HTTPS is required by default. For a deliberately trusted plaintext endpoint, the client requires an
+explicit opt-in:
+
+```bash
+export NEO4J_URI='http://host:7474'
+export NEO4J_ALLOW_INSECURE_HTTP=1
+```
+
+The HTTP adapter calls `/db/<database>/tx/commit`, honors the standard HTTP proxy environment, and
+raises Neo4j query errors without logging credentials.
+
 ## Analyses
 
 | Script | Analysis | Primary outputs |

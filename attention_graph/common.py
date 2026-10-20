@@ -6,8 +6,55 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from urllib.parse import quote, urlsplit
 
 from neo4j import GraphDatabase, READ_ACCESS
+import requests
+
+
+class HttpDriver:
+    """Small proxy-aware adapter for Neo4j's HTTP transaction endpoint."""
+
+    def __init__(self, uri: str, user: str, password: str | None, database: str):
+        self.uri = uri.rstrip("/")
+        self.database = database
+        self.session = requests.Session()
+        self.session.headers.update({"Accept": "application/json", "Content-Type": "application/json"})
+        if password is not None:
+            self.session.auth = (user, password)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc_info):
+        self.close()
+
+    def close(self) -> None:
+        self.session.close()
+
+    def verify_connectivity(self) -> None:
+        rows = self.query("RETURN 1 AS ok", {}, self.database)
+        if rows != [{"ok": 1}]:
+            raise RuntimeError("Neo4j HTTP connectivity check returned an unexpected response")
+
+    def query(self, statement: str, parameters: Mapping[str, Any], database: str) -> list[dict[str, Any]]:
+        endpoint = f"{self.uri}/db/{quote(database, safe='')}/tx/commit"
+        response = self.session.post(
+            endpoint,
+            json={"statements": [{"statement": statement, "parameters": dict(parameters)}]},
+            timeout=300,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        errors = payload.get("errors") or []
+        if errors:
+            details = "; ".join(f"{error.get('code')}: {error.get('message')}" for error in errors)
+            raise RuntimeError(f"Neo4j query failed: {details}")
+        results = payload.get("results") or []
+        if not results:
+            return []
+        columns = results[0].get("columns") or []
+        return [dict(zip(columns, item.get("row") or [])) for item in results[0].get("data") or []]
 
 
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
@@ -27,6 +74,16 @@ def connect(args: argparse.Namespace):
     if not args.uri:
         raise SystemExit("Set NEO4J_URI or pass --uri")
     password = os.getenv("NEO4J_PASSWORD")
+    scheme = urlsplit(args.uri).scheme.lower()
+    if scheme in {"http", "https"}:
+        if scheme == "http" and os.getenv("NEO4J_ALLOW_INSECURE_HTTP") != "1":
+            raise SystemExit(
+                "Refusing to send Neo4j credentials over plaintext HTTP. "
+                "Use HTTPS or explicitly set NEO4J_ALLOW_INSECURE_HTTP=1."
+            )
+        driver = HttpDriver(args.uri, args.user, password, args.database)
+        driver.verify_connectivity()
+        return driver
     auth = (args.user, password) if password else None
     driver = GraphDatabase.driver(args.uri, auth=auth, connection_timeout=15)
     driver.verify_connectivity()
@@ -34,6 +91,8 @@ def connect(args: argparse.Namespace):
 
 
 def read(driver, database: str, query: str, **parameters: Any) -> list[dict[str, Any]]:
+    if isinstance(driver, HttpDriver):
+        return driver.query(query, parameters, database)
     with driver.session(database=database, default_access_mode=READ_ACCESS) as session:
         return [record.data() for record in session.run(query, **parameters)]
 

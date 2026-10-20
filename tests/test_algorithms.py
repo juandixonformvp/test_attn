@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 
-from attention_graph.common import gini, js_divergence, normalized_entropy
+from attention_graph.common import HttpDriver, connect, gini, js_divergence, normalized_entropy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +53,26 @@ class MetricTests(unittest.TestCase):
         hubs, authorities = module.weighted_hits(edges)
         self.assertGreater(hubs["broad"], hubs["narrow"])
         self.assertGreater(authorities["c1"], authorities["c2"])
+
+    def test_http_driver_maps_transaction_rows(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "results": [{"columns": ["name", "score"], "data": [{"row": ["claim", 3]}]}],
+            "errors": [],
+        }
+        driver = HttpDriver("https://graph.example", "neo4j", "secret", "neo4j")
+        driver.session.post = Mock(return_value=response)
+        self.assertEqual(driver.query("RETURN 1", {}, "neo4j"), [{"name": "claim", "score": 3}])
+        called_url = driver.session.post.call_args.args[0]
+        self.assertEqual(called_url, "https://graph.example/db/neo4j/tx/commit")
+        driver.close()
+
+    def test_plain_http_requires_explicit_opt_in(self):
+        args = SimpleNamespace(uri="http://graph.example", user="neo4j", database="neo4j")
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(SystemExit):
+                connect(args)
 
 
 if __name__ == "__main__":
